@@ -1,0 +1,236 @@
+import sys
+import random
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QPushButton, QStackedWidget, QLabel, QComboBox, QGraphicsView, QGraphicsScene, QHBoxLayout
+)
+from PyQt5.QtCore import QTimer
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+from ur_rtde import RTDEReceiveInterface
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        self.setWindowTitle("UR3 HMI Interface")
+        self.setGeometry(100, 100, 1000, 800)
+
+        self.stack = QStackedWidget()
+        self.setCentralWidget(self.stack)
+
+        self.menu = QWidget()
+        menu_layout = QVBoxLayout()
+
+        self.pallet_button = QPushButton("Palletizing Page")
+        self.robot_data_button = QPushButton("Robot Data Page")
+        self.joint_data_button = QPushButton("Joint Data Page")
+
+        menu_layout.addWidget(self.pallet_button)
+        menu_layout.addWidget(self.robot_data_button)
+        menu_layout.addWidget(self.joint_data_button)
+
+        self.menu.setLayout(menu_layout)
+        self.stack.addWidget(self.menu)
+
+        self.pallet_page = PalletizingPage()
+        self.robot_data_page = RobotDataPage()
+        self.joint_data_page = JointDataPage()
+
+        self.stack.addWidget(self.pallet_page)
+        self.stack.addWidget(self.robot_data_page)
+        self.stack.addWidget(self.joint_data_page)
+
+        self.pallet_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.pallet_page))
+        self.robot_data_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.robot_data_page))
+        self.joint_data_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.joint_data_page))
+
+class PalletizingPage(QWidget):
+    def __init__(self):
+        super().__init__()
+        layout = QVBoxLayout()
+
+        dropdown_layout = QHBoxLayout()
+        self.x_select = QComboBox()
+        self.y_select = QComboBox()
+        self.z_select = QComboBox()
+
+        for i in range(1, 4):
+            self.x_select.addItem(str(i))
+            self.y_select.addItem(str(i))
+            self.z_select.addItem(str(i))
+
+        dropdown_layout.addWidget(QLabel("X:"))
+        dropdown_layout.addWidget(self.x_select)
+        dropdown_layout.addWidget(QLabel("Y:"))
+        dropdown_layout.addWidget(self.y_select)
+        dropdown_layout.addWidget(QLabel("Z:"))
+        dropdown_layout.addWidget(self.z_select)
+
+        layout.addLayout(dropdown_layout)
+
+        self.graphics_view = QGraphicsView()
+        self.scene = QGraphicsScene()
+        self.graphics_view.setScene(self.scene)
+        layout.addWidget(self.graphics_view)
+
+        self.x_select.currentIndexChanged.connect(self.update_blocks)
+        self.y_select.currentIndexChanged.connect(self.update_blocks)
+        self.z_select.currentIndexChanged.connect(self.update_blocks)
+
+        self.setLayout(layout)
+        self.update_blocks()
+
+    def update_blocks(self):
+        self.scene.clear()
+        x = int(self.x_select.currentText())
+        y = int(self.y_select.currentText())
+        z = int(self.z_select.currentText())
+
+        block_size = 20
+        spacing = 5
+
+        for i in range(x):
+            for j in range(y):
+                for k in range(z):
+                    rect = self.scene.addRect(
+                        i * (block_size + spacing),
+                        j * (block_size + spacing) + k * 100,  # simulate 3D by shifting layers
+                        block_size,
+                        block_size
+                    )
+
+class RobotDataPage(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # <-- Change to robot IP
+        self.history_length = 100
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Live Robot Data (Position, Velocity, Acceleration, Current, Torque)"))
+
+        self.graphs = {}
+        self.data = {k: [] for k in ["Position", "Velocity", "Acceleration", "Current", "Torque"]}
+
+        for title in self.data:
+            canvas, ax = self.create_plot(title)
+            self.graphs[title] = (canvas, ax)
+            layout.addWidget(canvas)
+
+        self.setLayout(layout)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_graphs)
+        self.timer.start(100)
+
+    def create_plot(self, title):
+        fig = Figure(figsize=(5, 1.5))
+        ax = fig.add_subplot(111)
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("Samples", fontsize=8)
+        ax.set_ylabel(title, fontsize=8)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        fig.tight_layout()
+        return FigureCanvas(fig), ax
+
+    def update_graphs(self):
+        try:
+            position = sum(self.rtde_r.getActualTCPPose()) / 6
+            velocity = sum(self.rtde_r.getActualTCPVelocity()) / 6
+            acceleration = sum(self.rtde_r.getActualTCPForce()) / 6
+            current = sum(self.rtde_r.getActualCurrent()) / 6
+            torque = sum(self.rtde_r.getTargetJointTorques()) / 6
+        except Exception as e:
+            print(f"RTDE error: {e}")
+            return
+
+        values = {"Position": position, "Velocity": velocity, "Acceleration": acceleration,
+                  "Current": current, "Torque": torque}
+
+        for key in self.data:
+            self.data[key].append(values[key])
+            if len(self.data[key]) > self.history_length:
+                self.data[key] = self.data[key][-self.history_length:]
+
+            canvas, ax = self.graphs[key]
+            ax.clear()
+            ax.plot(self.data[key], color='royalblue', linewidth=1.5)
+            ax.set_title(key, fontsize=10)
+            ax.set_xlabel("Samples", fontsize=8)
+            ax.set_ylabel(key, fontsize=8)
+            ax.grid(True, linestyle='--', alpha=0.6)
+            canvas.draw()
+
+class JointDataPage(QWidget):
+    def __init__(self):
+        super().__init__()
+
+        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # <-- Change to robot IP
+        self.history_length = 100
+        self.safe_limit = 3.0
+
+        self.joint_data = {f"Joint{i}": [] for i in range(6)}
+        self.target_data = {f"Joint{i}": [] for i in range(6)}
+        self.graphs = {}
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Joint Acceleration Graphs with Safe Mode Limits"))
+
+        for i in range(6):
+            name = f"Joint{i}"
+            canvas, ax = self.create_plot(name)
+            self.graphs[name] = (canvas, ax)
+            layout.addWidget(canvas)
+
+        self.setLayout(layout)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_graphs)
+        self.timer.start(100)
+
+    def create_plot(self, name):
+        fig = Figure(figsize=(5, 1.5))
+        ax = fig.add_subplot(111)
+        ax.set_title(name, fontsize=10)
+        ax.set_xlabel("Samples", fontsize=8)
+        ax.set_ylabel("Acceleration (m/s²)", fontsize=8)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        fig.tight_layout()
+        return FigureCanvas(fig), ax
+
+    def update_graphs(self):
+        try:
+            target = self.rtde_r.getTargetAcceleration()
+            actual = [random.uniform(-1.5, 2.0) for _ in range(6)]  # Replace with actual RTDE data if available
+        except Exception as e:
+            print(f"RTDE error: {e}")
+            return
+
+        for i in range(6):
+            name = f"Joint{i}"
+            self.joint_data[name].append(actual[i])
+            self.target_data[name].append(target[i])
+
+            if len(self.joint_data[name]) > self.history_length:
+                self.joint_data[name] = self.joint_data[name][-self.history_length:]
+                self.target_data[name] = self.target_data[name][-self.history_length:]
+
+            canvas, ax = self.graphs[name]
+            ax.clear()
+            ax.plot(self.joint_data[name], label="Actual", color='royalblue')
+            ax.plot(self.target_data[name], label="Target", color='orange', linestyle='--')
+            ax.axhline(self.safe_limit, color='red', linestyle=':', label="Safe Limit")
+            ax.axhline(-self.safe_limit, color='red', linestyle=':')
+            ax.set_title(name)
+            ax.set_xlabel("Samples")
+            ax.set_ylabel("Accel (m/s²)")
+            ax.grid(True, linestyle='--', alpha=0.6)
+            ax.legend(loc='upper right', fontsize=7)
+            canvas.draw()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
