@@ -1,8 +1,10 @@
 import sys
+import socket
 import random
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QPushButton, QStackedWidget, QLabel, QComboBox, QGraphicsView, QGraphicsScene, QHBoxLayout
+    QPushButton, QStackedWidget, QLabel, QComboBox, QGraphicsView,
+    QGraphicsScene, QHBoxLayout
 )
 from PyQt5.QtCore import QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -74,11 +76,16 @@ class PalletizingPage(QWidget):
         self.graphics_view.setScene(self.scene)
         layout.addWidget(self.graphics_view)
 
+        self.send_button = QPushButton("Start Palletizing")
+        layout.addWidget(self.send_button)
+
+        self.setLayout(layout)
+
         self.x_select.currentIndexChanged.connect(self.update_blocks)
         self.y_select.currentIndexChanged.connect(self.update_blocks)
         self.z_select.currentIndexChanged.connect(self.update_blocks)
+        self.send_button.clicked.connect(self.start_palletizing)
 
-        self.setLayout(layout)
         self.update_blocks()
 
     def update_blocks(self):
@@ -93,18 +100,61 @@ class PalletizingPage(QWidget):
         for i in range(x):
             for j in range(y):
                 for k in range(z):
-                    rect = self.scene.addRect(
+                    self.scene.addRect(
                         i * (block_size + spacing),
-                        j * (block_size + spacing) + k * 100,  # simulate 3D by shifting layers
+                        j * (block_size + spacing) + k * 60,
                         block_size,
                         block_size
                     )
+
+    def start_palletizing(self):
+        x = int(self.x_select.currentText())
+        y = int(self.y_select.currentText())
+        z = int(self.z_select.currentText())
+        script = self.generate_urscript(x, y, z)
+        self.send_urscript_to_robot(script)
+
+    def generate_urscript(self, x, y, z):
+        base_x = 0.3
+        base_y = 0.1
+        base_z = 0.2
+        dx = 0.05
+        dy = 0.05
+        dz = 0.05
+
+        script = "def palletize():\n"
+        script += "  movej([0, -1.57, 1.57, 0, 1.57, 0], a=1.2, v=0.5)\n"
+
+        for i in range(x):
+            for j in range(y):
+                for k in range(z):
+                    px = base_x + i * dx
+                    py = base_y + j * dy
+                    pz = base_z + k * dz
+                    script += "  set_digital_out(0, True)\n"
+                    script += f"  movel(p[{px:.3f}, {py:.3f}, {pz:.3f}, 0, 3.14, 0], a=1.2, v=0.25)\n"
+                    script += "  sleep(0.3)\n"
+                    script += "  set_digital_out(0, False)\n"
+
+        script += "end\n"
+        script += "palletize()\n"
+        return script
+
+    def send_urscript_to_robot(self, script, robot_ip="192.168.0.100", port=30002):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.connect((robot_ip, port))
+            s.send(script.encode('utf8'))
+            s.close()
+            print("URScript sent successfully.")
+        except Exception as e:
+            print(f"Failed to send URScript: {e}")
 
 class RobotDataPage(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # <-- Change to robot IP
+        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # Replace with real robot IP
         self.history_length = 100
 
         layout = QVBoxLayout()
@@ -166,7 +216,7 @@ class JointDataPage(QWidget):
     def __init__(self):
         super().__init__()
 
-        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # <-- Change to robot IP
+        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # Replace with real robot IP
         self.history_length = 100
         self.safe_limit = 3.0
 
@@ -194,7 +244,7 @@ class JointDataPage(QWidget):
         ax = fig.add_subplot(111)
         ax.set_title(name, fontsize=10)
         ax.set_xlabel("Samples", fontsize=8)
-        ax.set_ylabel("Acceleration (m/s²)", fontsize=8)
+        ax.set_ylabel("Acceleration (m/s\u00b2)", fontsize=8)
         ax.grid(True, linestyle='--', alpha=0.6)
         fig.tight_layout()
         return FigureCanvas(fig), ax
@@ -202,7 +252,7 @@ class JointDataPage(QWidget):
     def update_graphs(self):
         try:
             target = self.rtde_r.getTargetAcceleration()
-            actual = [random.uniform(-1.5, 2.0) for _ in range(6)]  # Replace with actual RTDE data if available
+            actual = [random.uniform(-1.5, 2.0) for _ in range(6)]
         except Exception as e:
             print(f"RTDE error: {e}")
             return
@@ -224,7 +274,7 @@ class JointDataPage(QWidget):
             ax.axhline(-self.safe_limit, color='red', linestyle=':')
             ax.set_title(name)
             ax.set_xlabel("Samples")
-            ax.set_ylabel("Accel (m/s²)")
+            ax.set_ylabel("Accel (m/s\u00b2)")
             ax.grid(True, linestyle='--', alpha=0.6)
             ax.legend(loc='upper right', fontsize=7)
             canvas.draw()
