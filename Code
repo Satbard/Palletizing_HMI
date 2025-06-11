@@ -1,286 +1,1190 @@
 import sys
-import socket
 import random
+import os
+import socket  # Add socket import at the top level
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QPushButton, QStackedWidget, QLabel, QComboBox, QGraphicsView,
-    QGraphicsScene, QHBoxLayout
+    QPushButton, QLabel, QComboBox, QGraphicsView, QGraphicsScene, QHBoxLayout,
+    QStackedLayout, QLineEdit, QFrame, QGridLayout, QSizePolicy, QScrollArea, QCompleter,
+    QMessageBox  # Add QMessageBox import
 )
-from PyQt5.QtCore import QTimer
+from PyQt5.QtGui import QPolygonF, QBrush, QPen, QColor, QFont
+from PyQt5.QtCore import Qt, QTimer, QPointF, QMargins
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import rtde_control
 from rtde_receive import RTDEReceiveInterface
+import rtde_io
+import time
+import matplotlib.pyplot as plt
+
+# Real RTDE Interface Configuration
+ROBOT_IP = "192.168.0.3"  # Replace with UR3 robot's IP address
+ROBOT_FREQUENCY = 500  # 500Hz for e-series, 125Hz for CB3
+RTDE_PORT = 30004  # Default RTDE port
+
+# URScript file location on Raspberry Pi
+URSCRIPT_PATH = "/home/raspberry/URScript Program"
+
+# Define RTDE variables globally to ensure consistency
+RTDE_VARIABLES = [
+    'actual_qd',             # actual joint velocities
+    'actual_TCP_pose',       # actual Cartesian coordinates of the tool
+    'actual_TCP_speed',      # actual speed of the tool given in Cartesian coordinates
+    'runtime_state'          # robot runtime state
+]
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("UR3 HMI Interface")
-        self.setGeometry(100, 100, 1000, 800)
+        self.showMaximized()
+        self.setFont(QFont("Arial", 12))
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f0f0f0;
+            }
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 10px 20px;
+                min-width: 150px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+            QPushButton:pressed {
+                background-color: #0D47A1;
+            }
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+            }
+            QComboBox {
+                padding: 5px;
+                border: 1px solid #BDBDBD;
+                border-radius: 4px;
+                min-width: 200px;
+            }
+            QLabel {
+                color: #212121;
+            }
+        """)
 
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
+        # Initialize RTDE interfaces with specific variables
+        try:
+            # Initialize RTDE Control Interface
+            self.rtde_c = rtde_control.RTDEControlInterface(ROBOT_IP)
+            
+            # Initialize RTDE Receive Interface with correct frequency
+            self.rtde_r = RTDEReceiveInterface(ROBOT_IP, ROBOT_FREQUENCY, RTDE_VARIABLES)
+            
+            # Initialize RTDE IO Interface
+            self.rtde_io = rtde_io.RTDEIOInterface(ROBOT_IP)
+            
+            print(f"Successfully connected to robot at {ROBOT_IP}")
+            
+        except Exception as e:
+            print(f"Failed to connect to robot: {e}")
+            print("Please verify:")
+            print("1. The robot IP address is correct")
+            print("2. The robot is powered on")
+            print("3. Your computer is on the same network as the robot")
+            print("4. No other programs are using RTDE connections")
+            sys.exit(1)
 
-        self.menu = QWidget()
-        menu_layout = QVBoxLayout()
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # Navigation buttons container with styling
+        nav_container = QFrame()
+        nav_container.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(15)
 
         self.pallet_button = QPushButton("Palletizing Page")
         self.robot_data_button = QPushButton("Robot Data Page")
         self.joint_data_button = QPushButton("Joint Data Page")
 
-        menu_layout.addWidget(self.pallet_button)
-        menu_layout.addWidget(self.robot_data_button)
-        menu_layout.addWidget(self.joint_data_button)
+        for btn in [self.pallet_button, self.robot_data_button, self.joint_data_button]:
+            btn.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            button_layout.addWidget(btn)
 
-        self.menu.setLayout(menu_layout)
-        self.stack.addWidget(self.menu)
+        nav_container.setLayout(button_layout)
+        main_layout.addWidget(nav_container)
 
+        # Content area
+        content_container = QFrame()
+        content_container.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                padding: 20px;
+            }
+        """)
+        
+        self.stack = QStackedLayout()
+        
+        # Create pages and pass RTDE interfaces to them
         self.pallet_page = PalletizingPage()
-        self.robot_data_page = RobotDataPage()
-        self.joint_data_page = JointDataPage()
+        self.robot_data_page = RobotDataPage(self.rtde_r)
+        self.joint_data_page = JointDataPage(self.rtde_r)
+        
+        # Store references to pages for cleanup
+        self.pages = [self.pallet_page, self.robot_data_page, self.joint_data_page]
 
         self.stack.addWidget(self.pallet_page)
         self.stack.addWidget(self.robot_data_page)
         self.stack.addWidget(self.joint_data_page)
 
-        self.pallet_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.pallet_page))
-        self.robot_data_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.robot_data_page))
-        self.joint_data_button.clicked.connect(lambda: self.stack.setCurrentWidget(self.joint_data_page))
+        content_layout = QVBoxLayout()
+        content_layout.addLayout(self.stack)
+        content_container.setLayout(content_layout)
+        main_layout.addWidget(content_container, stretch=1)
+
+        self.pallet_button.clicked.connect(lambda: self.change_page(self.pallet_page))
+        self.robot_data_button.clicked.connect(lambda: self.change_page(self.robot_data_page))
+        self.joint_data_button.clicked.connect(lambda: self.change_page(self.joint_data_page))
+
+        central_widget.setLayout(main_layout)
+
+    def change_page(self, page):
+        """Change page with visual feedback"""
+        self.stack.setCurrentWidget(page)
+        
+        # Reset all button styles
+        for btn in [self.pallet_button, self.robot_data_button, self.joint_data_button]:
+            btn.setStyleSheet("")
+            
+        # Highlight active button
+        active_button = {
+            self.pallet_page: self.pallet_button,
+            self.robot_data_page: self.robot_data_button,
+            self.joint_data_page: self.joint_data_button
+        }[page]
+        active_button.setStyleSheet("""
+            background-color: #1565C0;
+            font-weight: bold;
+        """)
+
+    def closeEvent(self, event):
+        """Handle cleanup when closing the application"""
+        try:
+            # Stop all timers
+            for page in self.pages:
+                if hasattr(page, 'timer'):
+                    page.timer.stop()
+
+            # Disconnect RTDE
+            if hasattr(self, 'rtde_c'):
+                self.rtde_c.disconnect()
+            if hasattr(self, 'rtde_r'):
+                self.rtde_r.disconnect()
+            if hasattr(self, 'rtde_io'):
+                self.rtde_io.disconnect()
+                
+            print("Successfully disconnected from robot")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        
+        event.accept()
 
 class PalletizingPage(QWidget):
     def __init__(self):
         super().__init__()
-        layout = QVBoxLayout()
+        # Initialize socket connection
+        self.HOST = "192.168.0.3"    # Robot IP
+        self.PORT = 30002            # Port for real-time commands
+        self.sock = None
+        self.connect_socket()
+        
+        # Create socket for receiving notifications
+        self.notification_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.notification_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.notification_socket.bind(('0.0.0.0', 5000))
+            self.notification_socket.listen(1)
+            self.notification_socket.setblocking(False)
+        except Exception as e:
+            print(f"Error setting up notification socket: {e}")
 
-        dropdown_layout = QHBoxLayout()
-        self.x_select = QComboBox()
-        self.y_select = QComboBox()
-        self.z_select = QComboBox()
+        # Create main layout with proper spacing
+        main_layout = QHBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
-        for i in range(1, 4):
-            self.x_select.addItem(str(i))
-            self.y_select.addItem(str(i))
-            self.z_select.addItem(str(i))
+        # Left panel for controls
+        left_panel = QFrame()
+        left_panel.setStyleSheet("""
+            QFrame {
+                background-color: #f8f9fa;
+                border-radius: 12px;
+                padding: 20px;
+            }
+        """)
+        left_panel.setFixedWidth(400)  # Increased width for better text visibility
+        controls_layout = QVBoxLayout()
+        controls_layout.setSpacing(20)
 
-        dropdown_layout.addWidget(QLabel("X:"))
-        dropdown_layout.addWidget(self.x_select)
-        dropdown_layout.addWidget(QLabel("Y:"))
-        dropdown_layout.addWidget(self.y_select)
-        dropdown_layout.addWidget(QLabel("Z:"))
-        dropdown_layout.addWidget(self.z_select)
+        # Status section with improved styling
+        status_frame = QFrame()
+        status_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                padding: 15px;
+            }
+            QLabel {
+                margin-bottom: 5px;
+                padding: 5px;
+                border-radius: 4px;
+            }
+        """)
+        status_layout = QVBoxLayout()
+        status_layout.setSpacing(10)
+        
+        status_title = QLabel("Robot Status")
+        status_title.setFont(QFont("Arial", 14, QFont.Bold))
+        status_layout.addWidget(status_title)
 
-        layout.addLayout(dropdown_layout)
+        self.status_label = QLabel("Ready")
+        self.status_label.setFont(QFont("Arial", 12))
+        self.status_label.setStyleSheet("""
+            color: green;
+            background-color: #f8f9fa;
+            padding: 8px;
+            border-radius: 4px;
+            min-height: 20px;
+        """)
+        self.status_label.setWordWrap(True)
+        self.status_label.setMinimumHeight(40)
+        status_layout.addWidget(self.status_label)
+
+        # Reset instruction label
+        self.reset_instruction = QLabel("Reset robot to enable palletizing")
+        self.reset_instruction.setFont(QFont("Arial", 12))
+        self.reset_instruction.setStyleSheet("""
+            color: #495057;
+            background-color: #e9ecef;
+            padding: 8px;
+            border-radius: 4px;
+        """)
+        self.reset_instruction.setVisible(False)  # Initially hidden
+        status_layout.addWidget(self.reset_instruction)
+        
+        status_frame.setLayout(status_layout)
+        controls_layout.addWidget(status_frame)
+
+        # Speed indicator
+        speed_label = QLabel("Robot Speed: 50%")
+        speed_label.setFont(QFont("Arial", 12))
+        speed_label.setStyleSheet("""
+            color: #495057;
+            background-color: #e9ecef;
+            padding: 8px;
+            border-radius: 4px;
+            margin-top: 5px;
+        """)
+        controls_layout.addWidget(speed_label)
+
+        # Pattern configuration section
+        pattern_frame = QFrame()
+        pattern_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                padding: 10px;
+            }
+            QLabel {
+                color: #495057;
+                padding: 0;
+                margin: 0;
+            }
+        """)
+        pattern_layout = QVBoxLayout()
+        pattern_layout.setSpacing(0)  # Remove spacing between elements
+        pattern_layout.setContentsMargins(5, 5, 5, 5)  # Minimal margins
+
+        pattern_title = QLabel("Pattern Configuration")
+        pattern_title.setFont(QFont("Arial", 14, QFont.Bold))
+        pattern_title.setContentsMargins(0, 0, 0, 5)  # Only bottom margin
+        pattern_layout.addWidget(pattern_title)
+
+        # Add small space before selector
+        pattern_layout.addSpacing(8)
+
+        # Pattern selector
+        selector_label = QLabel("Select Pattern:")
+        selector_label.setFont(QFont("Arial", 12))
+        selector_label.setContentsMargins(0, 0, 0, 2)  # Small bottom margin
+        pattern_layout.addWidget(selector_label)
+
+        # Create error message label
+        self.error_label = QLabel()
+        self.error_label.setFont(QFont("Arial", 10))
+        self.error_label.setStyleSheet("""
+            QLabel {
+                color: #dc3545;
+                padding: 5px;
+                margin-top: 5px;
+                background-color: #f8d7da;
+                border-radius: 4px;
+            }
+        """)
+        self.error_label.setWordWrap(True)
+        self.error_label.hide()
+        pattern_layout.addWidget(self.error_label)
+
+        # Create combo box with patterns
+        self.pattern_combo = QComboBox(self)
+        self.pattern_combo.setFont(QFont("Arial", 12))
+
+        # Define patterns list
+        patterns = [
+            "1x1x1", "1x1x2", "1x1x3",
+            "1x2x1", "1x2x2", "1x2x3",
+            "1x3x1", "1x3x2", "1x3x3",
+            "2x1x1", "2x1x2", "2x1x3",
+            "2x2x1", "2x2x2", "2x2x3",
+            "2x3x1", "2x3x2", "2x3x3",
+            "3x1x1", "3x1x2", "3x1x3",
+            "3x2x1", "3x2x2", "3x2x3",
+            "3x3x1", "3x3x2", "3x3x3"
+        ]
+        patterns.sort()
+
+        # Configure combo box
+        self.pattern_combo.addItems(patterns)
+        self.pattern_combo.setEditable(True)
+        self.pattern_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.pattern_combo.setMaxVisibleItems(9)
+        self.pattern_combo.setCurrentText("1x1x1")
+
+        # Add completer for search
+        completer = QCompleter(patterns)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        self.pattern_combo.setCompleter(completer)
+
+        # Style the combo box
+        self.pattern_combo.setStyleSheet("""
+            QComboBox {
+                padding: 8px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                min-width: 200px;
+                min-height: 20px;
+                background-color: white;
+            }
+            QComboBox:hover {
+                border-color: #2196F3;
+            }
+            QComboBox:focus {
+                border-color: #2196F3;
+                outline: none;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 20px;
+                padding-right: 5px;
+            }
+            QComboBox::down-arrow {
+                width: 12px;
+                height: 12px;
+                margin-right: 5px;
+            }
+            QComboBox QAbstractItemView {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                selection-background-color: #2196F3;
+                selection-color: white;
+                padding: 5px;
+            }
+            QComboBox QScrollBar:vertical {
+                width: 10px;
+                background: #f8f9fa;
+                border-radius: 5px;
+            }
+            QComboBox QScrollBar::handle:vertical {
+                background: #adb5bd;
+                border-radius: 5px;
+                min-height: 20px;
+            }
+            QComboBox QScrollBar::add-line:vertical,
+            QComboBox QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+        pattern_layout.addWidget(self.pattern_combo)
+        pattern_frame.setLayout(pattern_layout)
+        controls_layout.addWidget(pattern_frame)
+
+        # Control buttons section
+        buttons_frame = QFrame()
+        buttons_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 8px;
+                padding: 15px;
+            }
+            QPushButton {
+                min-height: 40px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+        """)
+        buttons_layout = QVBoxLayout()
+        buttons_layout.setSpacing(15)
+
+        self.start_button = QPushButton("Start Palletizing")
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+        buttons_layout.addWidget(self.start_button)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ffc107;
+                color: black;
+                border: none;
+                border-radius: 4px;
+                padding: 10px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+            QPushButton:disabled {
+                background-color: #6c757d;
+            }
+        """)
+        buttons_layout.addWidget(self.reset_button)
+
+        self.stop_button = QPushButton("EMERGENCY STOP")
+        self.stop_button.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: 2px solid #bd2130;
+                border-radius: 4px;
+                padding: 10px;
+                min-height: 50px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+        buttons_layout.addWidget(self.stop_button)
+
+        buttons_frame.setLayout(buttons_layout)
+        controls_layout.addWidget(buttons_frame)
+
+        # Add stretch to push everything to the top
+        controls_layout.addStretch()
+        left_panel.setLayout(controls_layout)
+        main_layout.addWidget(left_panel)
+
+        # Right panel for visualization
+        right_panel = QFrame()
+        right_panel.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+                padding: 20px;
+                min-width: 500px;
+            }
+        """)
+        viz_layout = QVBoxLayout()
+        viz_layout.setSpacing(15)
+
+        viz_title = QLabel("Pattern Visualization")
+        viz_title.setFont(QFont("Arial", 16, QFont.Bold))
+        viz_title.setAlignment(Qt.AlignCenter)
+        viz_title.setStyleSheet("color: #2c3e50; margin-bottom: 10px;")
+        viz_layout.addWidget(viz_title)
 
         self.graphics_view = QGraphicsView()
+        self.graphics_view.setStyleSheet("""
+            QGraphicsView {
+                border: 1px solid #dee2e6;
+                border-radius: 8px;
+                background-color: #f8f9fa;
+                min-height: 400px;
+            }
+        """)
         self.scene = QGraphicsScene()
         self.graphics_view.setScene(self.scene)
-        layout.addWidget(self.graphics_view)
+        viz_layout.addWidget(self.graphics_view)
 
-        self.send_button = QPushButton("Start Palletizing")
-        layout.addWidget(self.send_button)
+        right_panel.setLayout(viz_layout)
+        main_layout.addWidget(right_panel, stretch=2)
 
-        self.setLayout(layout)
+        self.setLayout(main_layout)
+        
+        # Connect signals
+        self.pattern_combo.currentTextChanged.connect(self.update_visualization)
+        self.start_button.clicked.connect(self.start_palletizing)
+        self.reset_button.clicked.connect(self.reset_robot)
+        self.stop_button.clicked.connect(self.emergency_stop)
+        
+        # Initial visualization
+        self.update_visualization()
 
-        self.x_select.currentIndexChanged.connect(self.update_blocks)
-        self.y_select.currentIndexChanged.connect(self.update_blocks)
-        self.z_select.currentIndexChanged.connect(self.update_blocks)
-        self.send_button.clicked.connect(self.start_palletizing)
-
-        self.update_blocks()
-
-    def update_blocks(self):
-        self.scene.clear()
-        x = int(self.x_select.currentText())
-        y = int(self.y_select.currentText())
-        z = int(self.z_select.currentText())
-
-        block_size = 20
-        spacing = 5
-
-        for i in range(x):
-            for j in range(y):
-                for k in range(z):
-                    self.scene.addRect(
-                        i * (block_size + spacing),
-                        j * (block_size + spacing) + k * 60,
-                        block_size,
-                        block_size
-                    )
+    def connect_socket(self):
+        """Establish socket connection to the robot"""
+        try:
+            if not self.sock:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sock.settimeout(10)
+                self.sock.connect((self.HOST, self.PORT))
+            return True
+        except Exception as e:
+            print(f"Socket connection error: {e}")
+            return False
 
     def start_palletizing(self):
-        x = int(self.x_select.currentText())
-        y = int(self.y_select.currentText())
-        z = int(self.z_select.currentText())
-        script = self.generate_urscript(x, y, z)
-        self.send_urscript_to_robot(script)
-
-    def generate_urscript(self, x, y, z):
-        base_x = 0.3
-        base_y = 0.1
-        base_z = 0.2
-        dx = 0.05
-        dy = 0.05
-        dz = 0.05
-
-        script = "def palletize():\n"
-        script += "  movej([0, -1.57, 1.57, 0, 1.57, 0], a=1.2, v=0.5)\n"
-
-        for i in range(x):
-            for j in range(y):
-                for k in range(z):
-                    px = base_x + i * dx
-                    py = base_y + j * dy
-                    pz = base_z + k * dz
-                    script += "  set_digital_out(0, True)\n"
-                    script += f"  movel(p[{px:.3f}, {py:.3f}, {pz:.3f}, 0, 3.14, 0], a=1.2, v=0.25)\n"
-                    script += "  sleep(0.3)\n"
-                    script += "  set_digital_out(0, False)\n"
-
-        script += "end\n"
-        script += "palletize()\n"
-        return script
-
-    def send_urscript_to_robot(self, script, robot_ip="192.168.0.100", port=30002):
+        """Start the palletizing program"""
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.connect((robot_ip, port))
-            s.send(script.encode('utf8'))
-            s.close()
-            print("URScript sent successfully.")
+            pattern = self.pattern_combo.currentText()
+            script_path = os.path.join(URSCRIPT_PATH, f"{pattern}.script")
+
+            if not os.path.exists(script_path):
+                print(f"URScript file not found: {script_path}")
+                self.status_label.setText("Error: Script Not Found")
+                self.status_label.setStyleSheet("color: red;")
+                return
+
+            # Read and send the URScript file
+            with open(script_path, 'r') as file:
+                urscript = file.read()
+                
+            # Set robot speed to 50%
+            speed_script = """
+def set_speed():
+    set_joint_speed_ratio(0.5)  # Set joint speed to 50%
+    set_tcp_speed_ratio(0.5)    # Set TCP speed to 50%
+end
+set_speed()
+"""
+            urscript = speed_script + urscript
+            
+            # Send the script
+            if not self.send_script(urscript):
+                self.status_label.setText("Error: Failed to Send Command")
+                self.status_label.setStyleSheet("color: red;")
+                return
+
+            # Update status and disable start button
+            self.status_label.setText("Program Running...")
+            self.status_label.setStyleSheet("color: blue;")
+            self.start_button.setEnabled(False)
+            self.reset_instruction.setVisible(True)
+
+            # Start monitoring for completion notification
+            self.monitor_completion()
+                
         except Exception as e:
-            print(f"Failed to send URScript: {e}")
+            print(f"Error during palletizing: {e}")
+            self.status_label.setText("Error Occurred")
+            self.status_label.setStyleSheet("color: red;")
+
+    def monitor_completion(self):
+        """Monitor for completion notification"""
+        try:
+            # Create a QTimer to check for notifications
+            self.completion_timer = QTimer()
+            self.completion_timer.timeout.connect(self.check_notification)
+            self.completion_timer.start(1000)  # Check every second
+        except Exception as e:
+            print(f"Error setting up completion monitoring: {e}")
+
+    def check_notification(self):
+        """Check for completion notification"""
+        try:
+            # Try to accept a connection
+            try:
+                client_socket, address = self.notification_socket.accept()
+                client_socket.settimeout(1)
+                data = client_socket.recv(1024).decode('utf-8')
+                client_socket.close()
+
+                if data and "completed successfully" in data:
+                    # Stop the timer
+                    self.completion_timer.stop()
+                    
+                    # Show success notification
+                    msg = QMessageBox()
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setWindowTitle("Program Complete")
+                    msg.setText("Palletizing Program Completed Successfully!")
+                    msg.setStandardButtons(QMessageBox.Ok)
+                    msg.setStyleSheet("""
+                        QMessageBox {
+                            background-color: white;
+                        }
+                        QMessageBox QLabel {
+                            color: #2c3e50;
+                            font-size: 12px;
+                            padding: 10px;
+                        }
+                        QMessageBox QPushButton {
+                            background-color: #2196F3;
+                            color: white;
+                            border: none;
+                            border-radius: 4px;
+                            padding: 5px 15px;
+                            min-width: 60px;
+                        }
+                        QMessageBox QPushButton:hover {
+                            background-color: #1976D2;
+                        }
+                    """)
+                    msg.exec_()
+                    
+                    # Update status
+                    self.status_label.setText("Program Completed Successfully")
+                    self.status_label.setStyleSheet("color: green;")
+                    self.start_button.setEnabled(True)
+                    self.reset_instruction.setVisible(False)
+            except BlockingIOError:
+                # No connection available, continue
+                pass
+            except Exception as e:
+                print(f"Error receiving notification: {e}")
+                
+        except Exception as e:
+            print(f"Error checking notification: {e}")
+
+    def reset_robot(self):
+        """Reset robot to home position"""
+        try:
+            # Script to move robot to home position
+            reset_script = """
+def reset_robot():
+    set_standard_digital_out(4, False)  # Turn off suction
+    movej([0, -1.57, 0, -1.57, 0, 0], a=1.4, v=1.05)  # Move to home position
+    popup("Robot reset complete", "Reset", False, False, blocking=False)
+end
+reset_robot()
+"""
+            if self.send_script(reset_script):
+                self.status_label.setText("Ready")
+                self.status_label.setStyleSheet("color: green;")
+                self.start_button.setEnabled(True)
+                self.reset_instruction.setVisible(False)
+            else:
+                self.status_label.setText("Reset Failed")
+                self.status_label.setStyleSheet("color: red;")
+                
+        except Exception as e:
+            print(f"Error during reset: {e}")
+            self.status_label.setText("Reset Failed")
+            self.status_label.setStyleSheet("color: red;")
+
+    def emergency_stop(self):
+        """Handle emergency stop"""
+        try:
+            stop_script = """
+def stop_program():
+    stopj(10)  # Stop joints with acceleration of 10 rad/s^2
+    set_standard_digital_out(4, False)  # Turn off suction
+    popup("Emergency Stop Activated", "Emergency Stop", False, False, blocking=False)
+end
+stop_program()
+"""
+            self.send_script(stop_script)
+            
+            self.status_label.setText("Emergency Stop Activated")
+            self.status_label.setStyleSheet("color: red;")
+            self.start_button.setEnabled(False)
+            self.reset_instruction.setVisible(True)
+            
+            # Visual feedback for emergency stop
+            self.stop_button.setStyleSheet("""
+                QPushButton {
+                    background-color: darkred;
+                    color: white;
+                    border: 2px solid red;
+                    border-radius: 4px;
+                    padding: 10px;
+                    min-height: 50px;
+                }
+            """)
+            
+            # Reset button style after 2 seconds
+            QTimer.singleShot(2000, self.reset_stop_button_style)
+            
+        except Exception as e:
+            print(f"Error during emergency stop: {e}")
+            self.status_label.setText("Emergency Stop Failed")
+            self.status_label.setStyleSheet("color: red;")
+
+    def send_script(self, script):
+        """Send script through socket connection"""
+        if not self.sock:
+            if not self.connect_socket():
+                return False
+        try:
+            script += '\n'
+            self.sock.send(script.encode('utf-8'))
+            return True
+        except Exception as e:
+            print(f"Error sending script: {e}")
+            return False
+
+    def reset_stop_button_style(self):
+        """Reset the emergency stop button style"""
+        self.stop_button.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: 2px solid #bd2130;
+                border-radius: 4px;
+                padding: 10px;
+                min-height: 50px;
+            }
+            QPushButton:hover {
+                background-color: #c82333;
+            }
+        """)
+
+    def closeEvent(self, event):
+        """Clean up when the page is closed"""
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+        if hasattr(self, 'notification_socket'):
+            try:
+                self.notification_socket.close()
+            except:
+                pass
+        if hasattr(self, 'completion_timer'):
+            try:
+                self.completion_timer.stop()
+            except:
+                pass
+        event.accept()
+
+    def update_visualization(self):
+        """Update the visualization based on the selected pattern"""
+        self.scene.clear()
+        pattern = self.pattern_combo.currentText()
+
+        # Get all available patterns from combo box
+        available_patterns = [self.pattern_combo.itemText(i) for i in range(self.pattern_combo.count())]
+
+        # Check if pattern is in available patterns
+        if pattern not in available_patterns:
+            self.scene.clear()
+            # Format available patterns in a grid-like structure
+            formatted_patterns = []
+            for i in range(0, len(available_patterns), 3):
+                row = available_patterns[i:i+3]
+                formatted_patterns.append("    ".join(row))
+            pattern_list = "\n".join(formatted_patterns)
+            
+            error_msg = f"Pattern '{pattern}' is not available.\n\nAvailable patterns:\n\n{pattern_list}"
+            self.error_label.setText(error_msg)
+            self.error_label.show()
+            return
+        else:
+            self.error_label.hide()
+
+        try:
+            x, y, z = map(int, pattern.split('x'))
+        except ValueError:
+            print(f"Invalid pattern format: {pattern}")
+            return
+
+        block_size = min(200 // max(x, y), 50)  # Adjust block size based on pattern size
+        offset_x = 150
+        offset_y = 50
+
+        for zi in range(z):
+            for yi in range(y):
+                for xi in range(x):
+                    dx = (xi - yi) * block_size
+                    dy = (xi + yi) * block_size * 0.5 - zi * block_size
+                    x0 = offset_x + dx
+                    y0 = offset_y + dy
+                    self.draw_cube(x0, y0, block_size)
+
+    def draw_cube(self, x, y, size):
+        # Calculate points for isometric view
+        # Top face
+        top = QPolygonF([
+            QPointF(x, y),
+            QPointF(x + size, y - size * 0.5),
+            QPointF(x + 2 * size, y),
+            QPointF(x + size, y + size * 0.5)
+        ])
+        
+        # Left face
+        left = QPolygonF([
+            QPointF(x, y),
+            QPointF(x + size, y + size * 0.5),
+            QPointF(x + size, y + size * 1.5),
+            QPointF(x, y + size)
+        ])
+        
+        # Right face
+        right = QPolygonF([
+            QPointF(x + size, y + size * 0.5),
+            QPointF(x + 2 * size, y),
+            QPointF(x + 2 * size, y + size),
+            QPointF(x + size, y + size * 1.5)
+        ])
+
+        # Enhanced colors and borders for better 3D effect
+        pen = QPen(Qt.black, 2)  # Thicker border
+        self.scene.addPolygon(top, pen, QBrush(QColor("#a5b4fc")))    # Top face - lightest
+        self.scene.addPolygon(left, pen, QBrush(QColor("#818cf8")))   # Left face - medium
+        self.scene.addPolygon(right, pen, QBrush(QColor("#6366f1")))  # Right face - darkest
 
 class RobotDataPage(QWidget):
-    def __init__(self):
+    def __init__(self, rtde_r):
         super().__init__()
+        self.rtde_r = rtde_r
+        self.history_length = 100  # Number of data points to show
+        self.start_time = time.time()
+        self.last_position = None
+        self.position_threshold = 0.0001  # 0.1mm threshold
 
-        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # Replace with real robot IP
-        self.history_length = 100
-
+        # Main layout
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("Live Robot Data (Position, Velocity, Acceleration, Current, Torque)"))
+        layout.setSpacing(20)
+        layout.setContentsMargins(10, 10, 10, 10)
 
+        # Graph configurations
         self.graphs = {}
-        self.data = {k: [] for k in ["Position", "Velocity", "Acceleration", "Current", "Torque"]}
+        graph_configs = [
+            {
+                "name": "TCP Position",
+                "height": 4,
+                "color": 'blue'
+            },
+            {
+                "name": "TCP Velocity",
+                "height": 4,
+                "color": 'red'
+            }
+        ]
 
-        for title in self.data:
-            canvas, ax = self.create_plot(title)
-            self.graphs[title] = (canvas, ax)
-            layout.addWidget(canvas)
+        # Create graphs
+        for config in graph_configs:
+            frame = QFrame()
+            frame.setStyleSheet("""
+                QFrame {
+                    background-color: white;
+                    border-radius: 8px;
+                    padding: 15px;
+                    margin-bottom: 10px;
+                }
+            """)
+            frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+            frame_layout = QVBoxLayout()
+            frame_layout.setSpacing(10)
+            
+            # Title
+            title = QLabel(config["name"])
+            title.setFont(QFont("Arial", 14, QFont.Bold))
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet("color: #2c3e50; margin-bottom: 5px;")
+            frame_layout.addWidget(title)
+            
+            # Graph
+            figure = Figure(figsize=(12, config["height"]))
+            figure.patch.set_facecolor('#ffffff')
+            canvas = FigureCanvas(figure)
+            canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+            figure.subplots_adjust(left=0.12, right=0.95, top=0.90, bottom=0.20)
+            
+            ax = figure.add_subplot(111)
+            ax.set_facecolor('#f8f9fa')
+            
+            # Store graph components
+            self.graphs[config["name"]] = {
+                "canvas": canvas,
+                "ax": ax,
+                "data": [],
+                "time_data": [],
+                "color": config["color"]
+            }
+            
+            frame_layout.addWidget(canvas)
+            frame.setLayout(frame_layout)
+            layout.addWidget(frame, stretch=1)
 
         self.setLayout(layout)
 
+        # Update timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_graphs)
-        self.timer.start(100)
-
-    def create_plot(self, title):
-        fig = Figure(figsize=(5, 1.5))
-        ax = fig.add_subplot(111)
-        ax.set_title(title, fontsize=10)
-        ax.set_xlabel("Samples", fontsize=8)
-        ax.set_ylabel(title, fontsize=8)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        fig.tight_layout()
-        return FigureCanvas(fig), ax
+        self.timer.start(100)  # 100ms update rate
 
     def update_graphs(self):
         try:
-            position = sum(self.rtde_r.getActualTCPPose()) / 6
-            velocity = sum(self.rtde_r.getActualTCPVelocity()) / 6
-            acceleration = sum(self.rtde_r.getActualTCPForce()) / 6
-            current = sum(self.rtde_r.getActualCurrent()) / 6
-            torque = sum(self.rtde_r.getTargetJointTorques()) / 6
+            current_time = time.time() - self.start_time
+            
+            # Get TCP data
+            try:
+                tcp_pose = self.rtde_r.getActualTCPPose()
+                tcp_speed = self.rtde_r.getActualTCPSpeed()
+                current_position = tcp_pose[2]  # Z position
+                current_velocity = (sum(x*x for x in tcp_speed[:3])) ** 0.5
+            except Exception as e:
+                print(f"Error getting TCP data: {e}")
+                return
+            
+            # Update graphs
+            for name, graph in self.graphs.items():
+                ax = graph["ax"]
+                ax.clear()
+                ax.set_facecolor('#f8f9fa')
+                
+                # Update time data
+                graph["time_data"].append(current_time)
+                if len(graph["time_data"]) > self.history_length:
+                    graph["time_data"] = graph["time_data"][-self.history_length:]
+                
+                # Update value data
+                if name == "TCP Position":
+                    # Apply threshold filter to position
+                    if self.last_position is not None:
+                        if abs(current_position - self.last_position) < self.position_threshold:
+                            value = self.last_position
+                        else:
+                            value = current_position
+                            self.last_position = current_position
+                    else:
+                        value = current_position
+                        self.last_position = current_position
+                else:  # Velocity
+                    value = current_velocity
+                
+                graph["data"].append(value)
+                if len(graph["data"]) > self.history_length:
+                    graph["data"] = graph["data"][-self.history_length:]
+                
+                # Plot data
+                ax.plot(graph["time_data"], graph["data"], 
+                       color=graph["color"], linewidth=2)
+                
+                # Set x-axis limits to show last 35 seconds
+                if graph["time_data"]:
+                    max_time = max(graph["time_data"])
+                    ax.set_xlim(max(0, max_time - 35), max_time)
+
+                # Customize appearance
+                ax.grid(True, linestyle='--', alpha=0.3, color='#dee2e6')
+                ax.yaxis.offsetText.set_visible(False)
+                
+                # Labels
+                units = {"TCP Position": "m", "TCP Velocity": "m/s"}
+                ax.set_ylabel(f"{name} ({units[name]})", fontsize=10, color='#495057', labelpad=10)
+                ax.set_xlabel("Time (s)", fontsize=10, color='#495057', labelpad=10)
+                
+                # Style
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['bottom'].set_color('#dee2e6')
+                ax.spines['left'].set_color('#dee2e6')
+                ax.tick_params(colors='#6c757d', pad=8)
+                
+                # Update canvas
+                graph["canvas"].draw()
+                
         except Exception as e:
-            print(f"RTDE error: {e}")
-            return
-
-        values = {"Position": position, "Velocity": velocity, "Acceleration": acceleration,
-                  "Current": current, "Torque": torque}
-
-        for key in self.data:
-            self.data[key].append(values[key])
-            if len(self.data[key]) > self.history_length:
-                self.data[key] = self.data[key][-self.history_length:]
-
-            canvas, ax = self.graphs[key]
-            ax.clear()
-            ax.plot(self.data[key], color='royalblue', linewidth=1.5)
-            ax.set_title(key, fontsize=10)
-            ax.set_xlabel("Samples", fontsize=8)
-            ax.set_ylabel(key, fontsize=8)
-            ax.grid(True, linestyle='--', alpha=0.6)
-            canvas.draw()
+            print(f"Error updating graphs: {e}")
 
 class JointDataPage(QWidget):
-    def __init__(self):
+    def __init__(self, rtde_r):
         super().__init__()
-
-        self.rtde_r = RTDEReceiveInterface("127.0.0.1")  # Replace with real robot IP
+        self.rtde_r = rtde_r
         self.history_length = 100
         self.safe_limit = 3.0
 
-        self.joint_data = {f"Joint{i}": [] for i in range(6)}
-        self.target_data = {f"Joint{i}": [] for i in range(6)}
+        # Main layout
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # Container for graphs
+        container = QWidget()
+        grid_layout = QGridLayout()
+        grid_layout.setSpacing(20)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+
         self.graphs = {}
-
-        layout = QVBoxLayout()
-        layout.addWidget(QLabel("Joint Acceleration Graphs with Safe Mode Limits"))
-
+        
+        # Create 6 joint graphs
         for i in range(6):
-            name = f"Joint{i}"
-            canvas, ax = self.create_plot(name)
-            self.graphs[name] = (canvas, ax)
-            layout.addWidget(canvas)
+            frame = QFrame()
+            frame.setStyleSheet("""
+                QFrame {
+                    background-color: white;
+                    border-radius: 8px;
+                    padding: 15px;
+                }
+            """)
+            frame.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+            frame_layout = QVBoxLayout()
+            frame_layout.setSpacing(10)
+            frame_layout.setContentsMargins(5, 5, 5, 5)
+            
+            # Title
+            title = QLabel(f"Joint {i+1}")
+            title.setFont(QFont("Arial", 14, QFont.Bold))
+            title.setAlignment(Qt.AlignCenter)
+            title.setStyleSheet("color: #2c3e50; margin-bottom: 5px;")
+            frame_layout.addWidget(title)
+            
+            # Graph
+            figure = Figure(figsize=(6, 3))
+            figure.patch.set_facecolor('#ffffff')
+            canvas = FigureCanvas(figure)
+            canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            
+            ax = figure.add_subplot(111)
+            ax.set_ylim(-4, 4)
+            ax.set_yticks([-3, -2, -1, 0, 1, 2, 3])
+            ax.set_facecolor('#f8f9fa')
+            
+            # Configure axes
+            ax.set_xlabel("Time(s)", fontsize=10, color='#495057', labelpad=10)
+            ax.set_ylabel("Joint Velocity (°/s)", fontsize=10, color='#495057', labelpad=10)
+            
+            # Style
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['bottom'].set_color('#dee2e6')
+            ax.spines['left'].set_color('#dee2e6')
+            ax.tick_params(colors='#6c757d', pad=8)
+            ax.grid(True, linestyle='--', alpha=0.2, color='#dee2e6')
+            
+            figure.subplots_adjust(left=0.15, right=0.95, top=0.9, bottom=0.25)
+            
+            # Store graph data
+            self.graphs[f"Joint{i}"] = {
+                "canvas": canvas,
+                "ax": ax,
+                "data": [],
+                "time_data": [],
+                "base_time": None
+            }
+            
+            frame_layout.addWidget(canvas)
+            frame.setLayout(frame_layout)
+            
+            # Add to grid layout
+            row = i // 3
+            col = i % 3
+            grid_layout.addWidget(frame, row, col)
 
-        self.setLayout(layout)
+        container.setLayout(grid_layout)
+        main_layout.addWidget(container, stretch=1)
+        self.setLayout(main_layout)
 
+        # Update timer
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_graphs)
         self.timer.start(100)
 
-    def create_plot(self, name):
-        fig = Figure(figsize=(5, 1.5))
-        ax = fig.add_subplot(111)
-        ax.set_title(name, fontsize=10)
-        ax.set_xlabel("Samples", fontsize=8)
-        ax.set_ylabel("Acceleration (m/s\u00b2)", fontsize=8)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        fig.tight_layout()
-        return FigureCanvas(fig), ax
-
     def update_graphs(self):
         try:
-            target = self.rtde_r.getTargetAcceleration()
-            actual = [random.uniform(-1.5, 2.0) for _ in range(6)]
+            current_time = time.time()
+            velocities = self.rtde_r.getActualQd()
+
+            for i in range(6):
+                graph = self.graphs[f"Joint{i}"]
+                
+                # Initialize base time if not set
+                if graph["base_time"] is None:
+                    graph["base_time"] = current_time
+                
+                # Calculate relative time
+                rel_time = current_time - graph["base_time"]
+                
+                # Update data
+                graph["time_data"].append(rel_time)
+                graph["data"].append(velocities[i])
+                
+                # Keep only last N points
+                if len(graph["time_data"]) > self.history_length:
+                    graph["time_data"] = graph["time_data"][-self.history_length:]
+                    graph["data"] = graph["data"][-self.history_length:]
+                
+                # Update plot
+                ax = graph["ax"]
+                ax.clear()
+                ax.plot(graph["time_data"], graph["data"], color='#007bff', linewidth=2)
+                ax.axhline(y=self.safe_limit, color='#dc3545', linestyle='--', alpha=0.5)
+                ax.axhline(y=-self.safe_limit, color='#dc3545', linestyle='--', alpha=0.5)
+                
+                # Set axis limits
+                ax.set_ylim(-4, 4)
+                ax.set_yticks([-3, -2, -1, 0, 1, 2, 3])
+                
+                if graph["time_data"]:
+                    max_time = max(graph["time_data"])
+                    ax.set_xlim(max(0, max_time - 35), max_time)
+                
+                # Style
+                ax.set_xlabel("Time(s)", fontsize=10, color='#495057', labelpad=10)
+                ax.set_ylabel("Joint Velocity (°/s)", fontsize=10, color='#495057', labelpad=10)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['bottom'].set_color('#dee2e6')
+                ax.spines['left'].set_color('#dee2e6')
+                ax.tick_params(colors='#6c757d', pad=8)
+                ax.grid(True, linestyle='--', alpha=0.2, color='#dee2e6')
+                
+                # Update canvas
+                graph["canvas"].draw()
+                
         except Exception as e:
-            print(f"RTDE error: {e}")
-            return
-
-        for i in range(6):
-            name = f"Joint{i}"
-            self.joint_data[name].append(actual[i])
-            self.target_data[name].append(target[i])
-
-            if len(self.joint_data[name]) > self.history_length:
-                self.joint_data[name] = self.joint_data[name][-self.history_length:]
-                self.target_data[name] = self.target_data[name][-self.history_length:]
-
-            canvas, ax = self.graphs[name]
-            ax.clear()
-            ax.plot(self.joint_data[name], label="Actual", color='royalblue')
-            ax.plot(self.target_data[name], label="Target", color='orange', linestyle='--')
-            ax.axhline(self.safe_limit, color='red', linestyle=':', label="Safe Limit")
-            ax.axhline(-self.safe_limit, color='red', linestyle=':')
-            ax.set_title(name)
-            ax.set_xlabel("Samples")
-            ax.set_ylabel("Accel (m/s\u00b2)")
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.legend(loc='upper right', fontsize=7)
-            canvas.draw()
+            print(f"Error updating joint graphs: {e}")
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
+    try:
+        app = QApplication(sys.argv)
+        app.setFont(QFont("Arial", 12))
+        window = MainWindow()
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        print(f"Application error: {e}")
+        sys.exit(1)
+    finally:
+        # Ensure cleanup happens even on error
+        if 'window' in locals():
+            window.close()
